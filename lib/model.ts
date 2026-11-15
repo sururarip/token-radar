@@ -135,6 +135,9 @@ export interface RadarRow {
   chains_multiplier: number;
   growth_multiplier: number;
   maturity_multiplier: number;
+  velocity_score: number;
+  velocity_label: string;
+  risk_band: string;
 }
 
 /** A live-token protocol: it already trades, so the board shows the market's own value, not a model's. */
@@ -161,6 +164,7 @@ export interface RadarData {
   live_size: number;
   rows: RadarRow[];
   live: LiveRow[];
+  categories: CategorySlice[];
 }
 
 /** Why the snapshot is not one this model can score. */
@@ -413,8 +417,26 @@ function secondActionFor(p: SnapshotProtocol, capital: number, chain: string): s
   return `Make a second, smaller deposit of $${half} into a different pool or vault on ${chain}.`;
 }
 
+/** A closing review step, worded for the position's risk: a hot, fast-moving protocol gets a
+ * prompt to bank some of the position if the move reverses, while a calm one gets a prompt to
+ * leave it alone and let the snapshots accumulate. */
+function reviewStep(risk: RiskBand): FarmStep {
+  if (risk === 'Elevated') {
+    return {
+      text: `Review the position every week while the move is hot, and take some of it off the table if the growth reverses sharply.`,
+      cost: 'about $3 of gas to unwind part of the position',
+      time: '10 minutes a week',
+    };
+  }
+  return {
+    text: `Review the position once a month, check the protocol's points page, and leave the position alone between reviews.`,
+    cost: 'nothing to review',
+    time: '10 minutes a month',
+  };
+}
+
 /**
- * A protocol's farm plan: eight steps, each an action with a cost and a time. The plan is derived
+ * A protocol's farm plan: nine steps, each an action with a cost and a time. The plan is derived
  * from the protocol's own record (category, chains, TVL, age), never from a hand-written list of
  * names. Every step names what it costs and how long it takes.
  */
@@ -423,6 +445,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
   const second = secondChainOf(p);
   const capital = capitalFor(p);
   const hold = holdDaysFor(age);
+  const risk = riskBandOf(p, age);
   const action = actionFor(p, capital, chain);
   const secondAction = secondActionFor(p, capital, chain);
   const spreadStep: FarmStep =
@@ -474,6 +497,7 @@ export function farmSteps(p: SnapshotProtocol, age: number | null): FarmStep[] {
       cost: 'nothing but the log',
       time: '5 minutes',
     },
+    reviewStep(risk),
   ];
 }
 
@@ -512,6 +536,9 @@ export function radarRow(row: BoardRow): RadarRow {
     chains_multiplier: row.model.chains_multiplier,
     growth_multiplier: row.model.growth_multiplier,
     maturity_multiplier: row.model.maturity_multiplier,
+    velocity_score: velocityOf(row).score,
+    velocity_label: velocityOf(row).label,
+    risk_band: riskBandOf(row, row.age_days),
   };
 }
 
@@ -532,6 +559,7 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     live_size: live.length,
     rows: board.map(radarRow),
     live,
+    categories: categoryBreakdown(board, snapshot.watchlist),
   };
   return { board, radar };
 }
@@ -597,6 +625,183 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
     if (!Number.isSafeInteger(r.implied_value_usd) || r.implied_value_usd <= 0) return `${r.slug} has implied value ${r.implied_value_usd}`;
   }
   return null;
+}
+
+// ---------------------------------------------------------------- velocity and risk
+//
+// The implied value ranks the board; it says nothing about direction. A protocol whose TVL is
+// shrinking is a different bet from one whose TVL is growing, even when their implied values
+// match, and a protocol that tripled in a week on a handful of deposits is a different bet from
+// one that grew a tenth on a billion dollars of fresh money. So the model also reads momentum and
+// risk off the same snapshot figures, as a second opinion the dashboard shows beside the ranking.
+// Neither number moves the ranking: the board stays one function of TVL, category, chains, growth
+// and age, and the velocity and risk readings sit next to it for a reader who wants the direction
+// as well as the level.
+
+/** A protocol's momentum, read off the snapshot alone. */
+export interface Velocity {
+  /** The momentum score, 0 to 100. */
+  score: number;
+  /** The score in words: Cooling, Steady, Heating or Surging. */
+  label: string;
+  /** The seven-day move the score read, or null when the snapshot carries none. */
+  weeklyChange: number | null;
+  /** The size tier the move sits in, 0 for the smallest pools, 3 for the largest. */
+  sizeTier: number;
+}
+
+/** The size tier a TVL sits in: a move on a large pool moves more money than the same move on a
+ * small one, so the tier is part of the momentum score. */
+export function sizeTierOf(tvl: number): number {
+  if (tvl >= 1_000_000_000) return 3;
+  if (tvl >= 100_000_000) return 2;
+  if (tvl >= 10_000_000) return 1;
+  return 0;
+}
+
+/** A momentum score in words: the bands the dashboard prints beside the number. */
+export function velocityLabel(score: number): string {
+  if (score >= 75) return 'Surging';
+  if (score >= 50) return 'Heating';
+  if (score >= 25) return 'Steady';
+  return 'Cooling';
+}
+
+/**
+ * A protocol's momentum score, 0 to 100. The move itself is worth up to 70 points: the seven-day
+ * change, clamped to -50..+100, stretched so a flat week scores near the middle and a strong rise
+ * scores near the top. The pool's size is worth up to 30: each tier adds ten, because the same
+ * percentage move on a larger pool is more money moving. A protocol with no recorded change takes
+ * the middle of the move scale, and a protocol with no TVL takes the smallest tier.
+ */
+export function velocityOf(p: { change_7d: number | null; tvl_usd: number }): Velocity {
+  const weekly = p.change_7d === null || !Number.isFinite(p.change_7d) ? null : p.change_7d;
+  const tier = sizeTierOf(p.tvl_usd);
+  const move = weekly === null ? 0 : Math.min(100, Math.max(-50, weekly));
+  const movePoints = ((move + 50) / 150) * 70;
+  const sizePoints = tier * 10;
+  const score = Math.max(0, Math.min(100, Math.round(movePoints + sizePoints)));
+  return { score, label: velocityLabel(score), weeklyChange: weekly, sizeTier: tier };
+}
+
+/** How exposed a farm position is, in three bands. */
+export type RiskBand = 'Lower' | 'Moderate' | 'Elevated';
+
+/**
+ * A protocol's risk band, from the same figures. A wild week cuts both ways: a rise past 50% in
+ * seven days, or a fall past 30%, is a spike that may not last, so either one is Elevated. A
+ * protocol listed under 90 days ago is unproven, so it is Elevated too, and one that has waited
+ * over two years with no token is Elevated because the wait itself is the doubt. A move between
+ * -30% and +50% on a protocol between three months and two years old is Moderate, and a gentle
+ * move on a protocol in that same age window is Lower. The band is a warning, not a verdict.
+ */
+export function riskBandOf(p: { change_7d: number | null }, age: number | null): RiskBand {
+  const weekly = p.change_7d === null || !Number.isFinite(p.change_7d) ? 0 : p.change_7d;
+  if (weekly > 50 || weekly < -30) return 'Elevated';
+  if (age !== null && age < 90) return 'Elevated';
+  if (age !== null && age > 730) return 'Elevated';
+  if (weekly > 20 || weekly < -10) return 'Moderate';
+  if (age !== null && age < 180) return 'Moderate';
+  return 'Lower';
+}
+
+// ---------------------------------------------------------------- category breakdown
+//
+// The board is one long list, but the money is not spread evenly: a few categories hold most of
+// the implied value, and a reader who only sees the list cannot tell whether the top is one
+// category's story or many. The breakdown groups the board by category, counts the rows, adds the
+// implied value, and names the strongest protocol in each group, so the shape of the whole launch
+// set is visible at a glance.
+
+/** One category's slice of the board. */
+export interface CategorySlice {
+  /** The category's name, or 'Other' when the snapshot names none. */
+  category: string;
+  /** How many board rows carry this category. */
+  rows: number;
+  /** How many of those rows came from the watchlist. */
+  watchlistRows: number;
+  /** The category's implied value, summed across its rows. */
+  totalImplied: number;
+  /** The category's share of the board's whole implied value, in per cent. */
+  sharePct: number;
+  /** The slug of the category's strongest row. */
+  topSlug: string;
+  /** The name of the category's strongest row. */
+  topName: string;
+  /** The strongest row's implied value. */
+  topImplied: number;
+}
+
+/**
+ * The board grouped by category, strongest total first. A category with no name on any row is
+ * grouped under 'Other'. The share is each slice's part of the board's whole implied value, so
+ * the slices always add to one hundred. A slice's top row is the one with the largest implied
+ * value in that slice, which is also the first of its rows in board order.
+ */
+export function categoryBreakdown(board: BoardRow[], watchlist: string[]): CategorySlice[] {
+  const watched = new Set(watchlist);
+  const grand = board.reduce((n, r) => n + r.implied_value_usd, 0);
+  const groups = new Map<string, BoardRow[]>();
+  for (const row of board) {
+    const key = row.category === null || row.category === '' ? 'Other' : row.category;
+    const list = groups.get(key);
+    if (list === undefined) groups.set(key, [row]);
+    else list.push(row);
+  }
+  const slices: CategorySlice[] = [];
+  for (const [category, list] of groups) {
+    const total = list.reduce((n, r) => n + r.implied_value_usd, 0);
+    const top = list[0]!;
+    slices.push({
+      category,
+      rows: list.length,
+      watchlistRows: list.filter((r) => watched.has(r.slug)).length,
+      totalImplied: total,
+      sharePct: grand > 0 ? Math.round((total / grand) * 1000) / 10 : 0,
+      topSlug: top.slug,
+      topName: top.name,
+      topImplied: top.implied_value_usd,
+    });
+  }
+  slices.sort((a, b) => b.totalImplied - a.totalImplied || (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
+  return slices;
+}
+
+// ---------------------------------------------------------------- ranking reasons
+//
+// A rank without a reason is a number to take on trust. The reasons say, in plain words, why a
+// row sits where it does: whether it is the largest pool, the fastest mover, the longest wait, the
+// strongest in its category, or simply one of the strongest handful on the whole board. Every
+// reason is checked against the board itself, so no row claims a superlative it does not hold.
+
+/**
+ * Two or three plain-word reasons a row ranks where it does. The first is always the row's own
+ * standing: its rank in words. The rest are superlatives the row actually holds on this board:
+ * the largest TVL, the fastest seven-day growth, the longest wait with no token, or the strongest
+ * row in its category. A row that holds none of those still gets its rank and its category's
+ * multiplier, so every row has something true said about it.
+ */
+export function reasonsFor(row: BoardRow, board: BoardRow[]): string[] {
+  const reasons: string[] = [];
+  if (row.rank === 1) reasons.push('The strongest implied value on the whole board.');
+  else if (row.rank <= 3) reasons.push(`One of the three strongest implied values on the whole board, at rank ${row.rank}.`);
+  else if (row.rank <= 10) reasons.push(`Inside the top ten, at rank ${row.rank} of ${board.length}.`);
+  else reasons.push(`Ranked ${row.rank} of ${board.length} by implied value.`);
+  const biggest = board.reduce((best, r) => (r.tvl_usd > best.tvl_usd ? r : best), board[0]!);
+  if (biggest.slug === row.slug) reasons.push('The largest TVL of any pre-token protocol on the board.');
+  const fastest = board.reduce((best, r) => ((r.change_7d ?? -Infinity) > (best.change_7d ?? -Infinity) ? r : best), board[0]!);
+  if (fastest.slug === row.slug && (row.change_7d ?? 0) > 0) reasons.push('The fastest seven-day growth of any row on the board.');
+  const oldest = board.reduce((best, r) => ((r.age_days ?? -1) > (best.age_days ?? -1) ? r : best), board[0]!);
+  if (oldest.slug === row.slug && (row.age_days ?? 0) > 0) reasons.push(`The longest-running pre-token protocol here, waiting ${row.age_days} days with no token.`);
+  const sameKind = board.filter((r) => (r.category ?? 'Other') === (row.category ?? 'Other'));
+  if (sameKind.length > 0 && sameKind[0]!.slug === row.slug) {
+    reasons.push(`The strongest implied value in its category, ${row.category ?? 'Other'}.`);
+  }
+  if (reasons.length < 2) {
+    reasons.push(`Its category carries a ${row.model.category_multiplier}x multiplier on each TVL dollar.`);
+  }
+  return reasons.slice(0, 3);
 }
 
 /** A compact data.js: the dashboard's whole dataset as one script, no fetch and no network. */

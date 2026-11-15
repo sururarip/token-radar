@@ -7,7 +7,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null };
+  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, compare: [] };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -134,6 +134,28 @@
     if (c.indexOf('insurance') >= 0) return 'Buy $' + half + ' of cover for a second, different risk on ' + chain + '.';
     return 'Make a second, smaller deposit of $' + half + ' into a different pool or vault on ' + chain + '.';
   }
+  // A protocol's risk band, read the same way the model reads it: a wild week, a very young
+  // listing, or a very long wait with no token is Elevated; a gentle move on a protocol in its
+  // middle years is Lower; anything between the two is Moderate.
+  function riskBandOf(p) {
+    var weekly = p.change_7d === null || p.change_7d === undefined || !isFinite(p.change_7d) ? 0 : p.change_7d;
+    var age = p.age_days === null || p.age_days === undefined ? null : p.age_days;
+    if (weekly > 50 || weekly < -30) return 'Elevated';
+    if (age !== null && age < 90) return 'Elevated';
+    if (age !== null && age > 730) return 'Elevated';
+    if (weekly > 20 || weekly < -10) return 'Moderate';
+    if (age !== null && age < 180) return 'Moderate';
+    return 'Lower';
+  }
+  // The closing review step, worded for the position's risk: a hot, fast-moving protocol gets a
+  // prompt to bank some of the position if the move reverses, while a calm one gets a prompt to
+  // leave it alone and let the snapshots accumulate.
+  function reviewStep(risk) {
+    if (risk === 'Elevated') {
+      return { text: 'Review the position every week while the move is hot, and take some of it off the table if the growth reverses sharply.', cost: 'about $3 of gas to unwind part of the position', time: '10 minutes a week' };
+    }
+    return { text: 'Review the position once a month, check the protocol\'s points page, and leave the position alone between reviews.', cost: 'nothing to review', time: '10 minutes a month' };
+  }
   function farmSteps(p) {
     var chain = chainOf(p);
     var second = secondChainOf(p);
@@ -150,7 +172,8 @@
       { text: 'Make one qualifying action each week, such as a deposit, a borrow, a swap or a vote.', cost: 'about $2 of gas a week', time: '10 minutes a week' },
       { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
-      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
+      { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' },
+      reviewStep(riskBandOf(p))
     ].map(stepText);
   }
 
@@ -388,6 +411,93 @@
     }
   }
 
+  // Where the implied value sits: the board grouped by category, strongest total first. A few
+  // categories hold most of the value, and the panel names the strongest protocol in each group so
+  // a reader can see whether the top of the board is one category's story or many.
+  function categoryPanel() {
+    var slices = DATA.categories || [];
+    if (slices.length === 0) return null;
+    var rows = slices.map(function (s) {
+      return el('div', { class: 'slice' },
+        el('div', { class: 'slice-head' },
+          el('b', { text: s.category }),
+          el('span', { class: 'num', text: fmtUsd(s.totalImplied) + ' · ' + s.sharePct + '%' })
+        ),
+        el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round(s.sharePct)) + '%' })),
+        el('p', { class: 'sub', text: s.rows + ' rows · ' + s.watchlistRows + ' from the watchlist · strongest: ' + s.topName + ' (' + fmtUsd(s.topImplied) + ')' })
+      );
+    });
+    return el('section', { class: 'panel categories' },
+      el('h2', { text: 'Where the implied value sits' }),
+      el('p', { class: 'sub', text: 'The board grouped by category, strongest total first. A few categories hold most of the value.' }),
+      el('div', { class: 'slice-list' }, rows)
+    );
+  }
+
+  // Two protocols, side by side. A reader picks any two rows from the board and the panel lays
+  // their model inputs next to each other: TVL, growth, age, every multiplier, the implied value,
+  // the momentum score and the risk band. The point is not to crown a winner but to make the
+  // difference visible: two protocols can carry a similar implied value for opposite reasons, and
+  // the comparison is what shows which reason is doing the work.
+  function comparePanel() {
+    var first = state.compare[0] || '';
+    var second = state.compare[1] || '';
+    function picker(slot, current) {
+      var select = el('select', { 'aria-label': 'Compare protocol ' + (slot + 1) },
+        el('option', { value: '', text: 'Pick a protocol' }),
+        DATA.rows.map(function (r) {
+          return el('option', { value: r.slug, text: '#' + r.rank + ' ' + r.name, selected: r.slug === current ? 'selected' : null });
+        })
+      );
+      select.addEventListener('change', function () {
+        var next = [state.compare[0] || '', state.compare[1] || ''];
+        next[slot] = select.value;
+        state.compare = next.filter(function (s) { return !!s; });
+        render();
+      });
+      return el('div', { class: 'field' }, el('label', { text: 'Protocol ' + (slot + 1) }), select);
+    }
+    var picked = state.compare.map(function (slug) {
+      return DATA.rows.filter(function (r) { return r.slug === slug; })[0];
+    }).filter(function (r) { return !!r; });
+    var fields = [
+      ['Implied value', function (r) { return fmtUsd(r.implied_value_usd); }],
+      ['TVL', function (r) { return fmtUsd(r.tvl_usd); }],
+      ['Seven-day growth', function (r) { return fmtPct(r.change_7d); }],
+      ['Age with no token', function (r) { return fmtAge(r.age_days); }],
+      ['Category multiplier', function (r) { return String(r.category_multiplier); }],
+      ['Chains multiplier', function (r) { return String(r.chains_multiplier); }],
+      ['Growth multiplier', function (r) { return String(r.growth_multiplier); }],
+      ['Maturity multiplier', function (r) { return String(r.maturity_multiplier); }],
+      ['Momentum score', function (r) { return r.velocity_score === undefined ? 'n/a' : r.velocity_score + ' (' + (r.velocity_label || '') + ')'; }],
+      ['Risk band', function (r) { return r.risk_band || 'n/a'; }]
+    ];
+    var body;
+    if (picked.length === 0) {
+      body = el('p', { class: 'sub', text: 'Nothing picked yet. Choose two protocols above and their model inputs will appear side by side.' });
+    } else {
+      var head = el('tr', null, el('th', { scope: 'col', text: 'Measure' }));
+      picked.forEach(function (r) {
+        head.appendChild(el('th', { scope: 'col' }, el('div', { class: 'name' }, el('b', { text: r.name }), el('span', { class: 'sub', text: 'Rank ' + r.rank }))));
+      });
+      var tbody = el('tbody');
+      fields.forEach(function (f) {
+        var tr = el('tr', null, el('td', { text: f[0] }));
+        picked.forEach(function (r) { tr.appendChild(el('td', { class: 'num', text: f[1](r) })); });
+        tbody.appendChild(tr);
+      });
+      body = el('div', { class: 'table-wrap' }, el('table', null, el('thead', null, head), tbody));
+    }
+    var clear = el('button', { class: 'button', type: 'button', text: 'Clear comparison', onclick: function () { state.compare = []; render(); } });
+    return el('section', { class: 'panel compare' },
+      el('h2', { text: 'Compare two protocols' }),
+      el('p', { class: 'sub', text: 'The same model inputs, side by side, for the two protocols you pick. Two protocols can carry a similar implied value for opposite reasons.' }),
+      el('div', { class: 'compare-pickers' }, picker(0, first), picker(1, second)),
+      body,
+      el('div', { class: 'compare-actions' }, clear)
+    );
+  }
+
   function render() {
     app.textContent = '';
     var shell = el('div', { class: 'shell' });
@@ -395,7 +505,12 @@
     shell.appendChild(lede());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
-    if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') {
+      shell.appendChild(modelPanel());
+      var cats = categoryPanel();
+      if (cats) shell.appendChild(cats);
+      shell.appendChild(comparePanel());
+    }
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');
     if (!dialog.isConnected) app.appendChild(dialog);

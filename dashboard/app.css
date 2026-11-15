@@ -137,3 +137,20 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* Where the value sits: one slice per category, the strongest total first. */
+.categories { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.slice-list { display: grid; gap: var(--step-4); }
+.slice { display: grid; gap: var(--step-2); padding-bottom: var(--step-4); border-bottom: 1px solid var(--border); }
+.slice:last-child { padding-bottom: 0; border-bottom: 0; }
+.slice-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--step-3); }
+.slice-head b { font-weight: 600; }
+.slice .bar { width: 100%; }
+
+/* Two protocols, side by side: the pickers, the comparison table, and the clear button. */
+.compare { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.compare-pickers { display: flex; flex-wrap: wrap; gap: var(--step-3); }
+.compare-pickers .field { flex: 1 1 220px; }
+.compare-pickers select { width: 100%; }
+.compare .table-wrap { margin-top: var(--step-2); }
+.compare-actions { display: flex; flex-wrap: wrap; gap: var(--step-2); }
