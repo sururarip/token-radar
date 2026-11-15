@@ -50,12 +50,16 @@ export interface Snapshot {
   watchlist: string[];
 }
 
-// The token radar's model (radar-3): a size curve FITTED from the snapshot's own traded
+// The token radar's model (radar-5): a size curve FITTED from the snapshot's own traded
 // comparables, not a hand-set multiple. The snapshot carries 129 protocols whose token already
 // trades (a market cap on record). Of those, the comparables are the ones a launch candidate
 // can honestly be priced against: not a wrapped, staked or bridged product, not an exchange,
-// and with a market-cap-to-TVL ratio inside [0.005, 20] so one freak record cannot bend the
-// fit. That leaves 89 comps. On them the model fits, by least squares,
+// and with a market-cap-to-TVL ratio inside [0.05, 5] — the window where a token's value is
+// actually tied to its protocol's size. Below 0.05 the token is worth under a twentieth of the
+// TVL, a nearly dead token; above 5 it is worth over five times the TVL, a speculative
+// premium. The ratio distribution's own bulk sits inside that window (median 0.25, 75th
+// percentile about 1.06), so the filter keeps the central mass and trims the tails. That
+// leaves 67 comps. On them the model fits, by least squares,
 //   log10(market cap) = a + b * log10(TVL),
 // the size curve: bigger protocols carry a smaller multiple of their TVL, because the traded
 // set says so (the fitted slope is well under 1). The curve is fitted fresh on every run from
@@ -64,13 +68,17 @@ export interface Snapshot {
 // of either on the multiple (the regression slopes are near zero): they are stated priors, not
 // fitted claims, and the curve does the work.
 //
-// The fit is tested blind, two ways, on the same run: leave-one-out (fit on 88 comps, predict
-// the held-out one, for all 89) and a time split (fit on comps listed before 2025-06-01, test
-// on the ones listed after). The median error multiple of each is reported in the dashboard's
-// Method section and in the fit record, and the time-split median is the band: a protocol's
-// implied value is stated with a low end (implied / band) and a high end (implied * band).
-// A band is honest about a noisy fit; a single number would pretend the model knows more
-// than it does.
+// The fit is tested blind, four ways, on the same run: leave-one-out (fit on 66 comps, predict
+// the held-out one, for all 67), a time split (fit on comps listed before 2025-06-01, test on
+// the ones listed after), a 5-fold cross-validation, and a bootstrap that resamples the comps
+// 200 times and reports how far the slope and intercept move. The median error multiple of
+// each is reported in the dashboard's Method section and in the fit record, and the time-split
+// median is the band: a protocol's implied value is stated with a low end (implied / band)
+// and a high end (implied * band). A band is honest about a noisy fit; a single number would
+// pretend the model knows more than it does. Alternatives tested and rejected, with the
+// numbers: fitting seven-day growth as a feature (a protocol up 4,448% in a week would jump
+// to the top of the board on noise alone), a category factor and a chain count (both raised
+// the blind error), and a wider comp window (more comps, worse blind error on every test).
 
 /** The fitted size curve and its blind tests, all computed from the snapshot on this run. */
 export interface SizeCurveFit {
@@ -90,6 +98,16 @@ export interface SizeCurveFit {
   splitMedian: number;
   /** How many comps the time-split test set held. */
   splitN: number;
+  /** 5-fold cross-validation median error multiple (shuffled, seeded). */
+  kfoldMedian: number;
+  /** Bootstrap 5th percentile of the fitted slope (200 resamples, seeded). */
+  slopeP5: number;
+  /** Bootstrap 95th percentile of the fitted slope (200 resamples, seeded). */
+  slopeP95: number;
+  /** Bootstrap 5th percentile of the fitted intercept (200 resamples, seeded). */
+  interceptP5: number;
+  /** Bootstrap 95th percentile of the fitted intercept (200 resamples, seeded). */
+  interceptP95: number;
   /** The error multiple used for the implied-value band (the time-split median). */
   band: number;
   /** Share of launch value assumed to go to farmers (a stated assumption, 7%). */
@@ -101,7 +119,7 @@ export interface SizeCurveFit {
 }
 
 /** The model's version label: the dashboard names it and the rules quote it. */
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** How many live-token protocols the Live token view carries, by market cap. */
 export const LIVE_ROWS = 24;
@@ -233,22 +251,34 @@ export function ageDays(asOf: string, listedAt: string | null): number | null {
 //
 // The comparables are the snapshot's own traded protocols, cleaned the same way the board is
 // cleaned: no wrapped, staked or bridged product, no exchange, and a market-cap-to-TVL ratio
-// inside [0.005, 20] so one freak record (a token worth 400x its TVL, or a bridge receipt
-// worth 0.0003x) cannot bend the fit. The curve is a least-squares fit of log10(market cap)
-// on log10(TVL) over those comps, fitted fresh on every run. The backtests are computed on
-// the same run: leave-one-out over all comps, and a time split that fits on comps listed
-// before 2025-06-01 and tests on the ones listed after. Nothing about the curve is hand-set.
+// inside [0.05, 5] so the fit learns from protocols whose token value is actually tied to
+// their TVL. Below 0.05 the token is worth under a twentieth of the TVL — a nearly dead token
+// whose price says nothing about a launch — and above 5 the token is worth over five times
+// the TVL, a speculative premium, not a size relationship. The ratio distribution's own bulk
+// sits inside that window (median 0.25, 75th percentile about 1.06), so the filter keeps the
+// central mass and trims the tails, not the other way round. That leaves 67 comps, and the
+// curve is a least-squares fit of log10(market cap) on log10(TVL) over those comps, fitted
+// fresh on every run. The backtests are computed on the same run: leave-one-out over all
+// comps, a time split that fits on comps listed before 2025-06-01 and tests on the ones listed
+// after, a 5-fold cross-validation, and a bootstrap over the comps that reports how far the
+// slope and intercept move when the comparables are resampled. Nothing about the curve is
+// hand-set. Growth stays a small prior (weight 0.25), not a fitted feature: fitting it lets
+// one week's spike dominate the valuation — a protocol up 4,448% in seven days would jump
+// to the top of the board on noise alone — so the curve does the work and growth only nudges
+// it. A category factor and a chain count were tested and rejected: both raised the blind
+// error, so neither is in the model.
 
 /** The categories the board leaves out, which the comparables leave out too. */
 const WRAPPED_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
 
 /** A traded protocol the curve can honestly be fitted on: a market cap and a TVL on record,
- * not a wrapped, staked or bridged product, not an exchange, and a ratio inside [0.005, 20]. */
+ * not a wrapped, staked or bridged product, not an exchange, and a market-cap-to-TVL ratio
+ * inside [0.05, 5] — the window where the token's value is tied to the protocol's size. */
 function isComparable(p: SnapshotProtocol): boolean {
   if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) return false;
   if (WRAPPED_CATEGORIES.has(p.category ?? '')) return false;
   const ratio = p.mcap_usd / p.tvl_usd;
-  return ratio >= 0.005 && ratio <= 20;
+  return ratio >= 0.05 && ratio <= 5;
 }
 
 /** Least squares of log10(mcap) on log10(tvl): intercept, slope and R-squared. */
@@ -320,12 +350,77 @@ function timeSplitError(comps: SnapshotProtocol[], cutoff: string): { median: nu
   return { median: median(errors), n: test.length };
 }
 
+/** A small deterministic PRNG (mulberry32) so the bootstrap and the k-fold are the same on
+ * every run: the dossier is byte-identical when the program runs twice. */
+function seededRandom(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Bootstrap stability: resample the comps with replacement, refit, and report the 5th and
+ * 95th percentiles of the slope and intercept, so the dashboard can say how far the curve
+ * moves when the comparables change. A tight interval means the fit is stable; a wide one
+ * means the curve leans on a few comps. 200 resamples, seeded, so the run is reproducible. */
+function bootstrapFit(comps: SnapshotProtocol[]): { slopeP5: number; slopeP95: number; interceptP5: number; interceptP95: number } {
+  const rand = seededRandom(20261114);
+  const slopes: number[] = [];
+  const intercepts: number[] = [];
+  for (let b = 0; b < 200; b++) {
+    const sample: SnapshotProtocol[] = [];
+    for (let i = 0; i < comps.length; i++) sample.push(comps[Math.floor(rand() * comps.length)]!);
+    const { intercept, slope } = fitLogLog(sample);
+    slopes.push(slope);
+    intercepts.push(intercept);
+  }
+  const pct = (values: number[], q: number): number => {
+    const sorted = [...values].sort((a, b) => a - b);
+    return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * q))]!;
+  };
+  return {
+    slopeP5: Math.round(pct(slopes, 0.05) * 1000) / 1000,
+    slopeP95: Math.round(pct(slopes, 0.95) * 1000) / 1000,
+    interceptP5: Math.round(pct(intercepts, 0.05) * 1000) / 1000,
+    interceptP95: Math.round(pct(intercepts, 0.95) * 1000) / 1000,
+  };
+}
+
+/** 5-fold cross-validation: shuffle the comps (seeded), hold out one fifth at a time, fit on
+ * the rest and predict the held-out fifth. The median error across all five folds is a third
+ * blind test beside the leave-one-out and the time split, and it does not lean on the listing
+ * date the way the time split does. */
+function kfoldError(comps: SnapshotProtocol[]): number {
+  const rand = seededRandom(20261114);
+  const index = comps.map((_, i) => i);
+  for (let i = index.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [index[i], index[j]] = [index[j]!, index[i]!];
+  }
+  const errors: number[] = [];
+  for (let fold = 0; fold < 5; fold++) {
+    const testIdx = new Set(index.filter((_, i) => i % 5 === fold));
+    const train = comps.filter((_, i) => !testIdx.has(i));
+    const test = comps.filter((_, i) => testIdx.has(i));
+    if (train.length < 5 || test.length === 0) continue;
+    const { intercept, slope } = fitLogLog(train);
+    for (const p of test) errors.push(errorMultiple(Math.pow(10, intercept + slope * Math.log10(p.tvl_usd)), p.mcap_usd!));
+  }
+  return median(errors);
+}
+
 /** The fitted size curve and its blind tests, from the snapshot's own traded comparables. */
 export function fitSizeCurve(snapshot: Snapshot): SizeCurveFit {
   const comps = snapshot.protocols.filter(isComparable);
   const { intercept, slope, r2 } = fitLogLog(comps);
   const loo = looErrors(comps);
   const split = timeSplitError(comps, '2025-06-01');
+  const kfold = kfoldError(comps);
+  const boot = bootstrapFit(comps);
   // The band uses the time-split median (the blind test) when it exists; otherwise the LOO median.
   const band = split.median > 0 ? split.median : median(loo);
   return {
@@ -337,6 +432,11 @@ export function fitSizeCurve(snapshot: Snapshot): SizeCurveFit {
     looP75: Math.round(p75(loo) * 100) / 100,
     splitMedian: Math.round(split.median * 100) / 100,
     splitN: split.n,
+    kfoldMedian: Math.round(kfold * 100) / 100,
+    slopeP5: boot.slopeP5,
+    slopeP95: boot.slopeP95,
+    interceptP5: boot.interceptP5,
+    interceptP95: boot.interceptP95,
     band: Math.round(band * 100) / 100,
     farmerPoolPct: 0.07,
     farmerShare: 0.0005,

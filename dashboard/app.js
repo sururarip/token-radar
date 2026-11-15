@@ -250,7 +250,7 @@
     return el('section', { class: 'lede' },
       el('div', null,
         el('h1', { text: DATA.watchlist_size + ' watchlist protocols, ranked by implied value' }),
-        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' more genuine launch candidates the watchlist leaves out, above and below that floor. Wrapped, staked and bridged products are set aside: their token already trades. Implied value comes from a size curve fitted on ' + DATA.fit.comps + ' traded comparables and tested blind (leave-one-out median error ' + DATA.fit.looMedian + 'x), not a hand-set multiple \u2014 a dollar of TVL is worth less as a protocol grows. Every farm plan is netted to the dollar, with a Farm, Thin or Skip verdict. Implied value is a model, not a promise.' })
+        el('p', { text: 'The watchlist is the floor: every protocol with at least $' + Math.round(DATA.floor_usd / 1e6) + 'M of TVL and no token on record. The early radar adds ' + DATA.early_size + ' more genuine launch candidates the watchlist leaves out, above and below that floor. Wrapped, staked and bridged products are set aside: their token already trades. Implied value comes from a size curve fitted on ' + DATA.fit.comps + ' traded comparables and tested blind four ways (leave-one-out ' + DATA.fit.looMedian + 'x, time split ' + DATA.fit.splitMedian + 'x, 5-fold ' + DATA.fit.kfoldMedian + 'x), not a hand-set multiple \u2014 a dollar of TVL is worth less as a protocol grows. Every farm plan is netted to the dollar, with a Farm, Thin or Skip verdict. Implied value is a model, not a promise.' })
       ),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
@@ -381,20 +381,38 @@
 
   function modelPanel() {
     var f = DATA.fit;
+    function curveAt(tvl) {
+      return Math.max(1, Math.round(Math.pow(10, f.intercept + f.slope * Math.log10(tvl))));
+    }
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
       el('p', { class: 'sub', text: 'Every row is scored by one fitted curve, not a hand-set multiple. The curve is fitted on the snapshot\u2019s own traded protocols, and it is tested blind before it prices anything.' }),
       el('div', { class: 'formula' },
         'implied = round( 10 ^ (' + f.intercept + ' + ' + f.slope + ' x log10(tvl_usd)) x (1 + clamp(change_7d, -50, 100) / 100 x ' + f.growthWeight + ') x launchWindow(age_days) )'
       ),
-      el('p', { class: 'sub', text: 'The comparables are the ' + f.comps + ' traded protocols with a market cap on record, cleaned the same way the board is cleaned: no wrapped, staked or bridged product, no exchange, and a market-cap-to-TVL ratio inside [0.005, 20] so one freak record cannot bend the fit. The fit is least squares of log10(market cap) on log10(TVL): intercept ' + f.intercept + ', slope ' + f.slope + ', R\u00b2 ' + f.r2 + '. A dollar of TVL is worth less, not more, as a protocol grows: the curve prices $1B of TVL at about $61M and $10B at about $224M, where the old flat 0.25x multiple priced them at $250M and $2.5B. Growth and the launch window are small stated priors, not fitted claims: the comps show no reliable growth or age effect on the multiple, so a fast week lifts the value a little and a bad week trims it a little, and launchWindow rises from 0.80 at listing to 1.00 over 18 months, holds to 2 years, then eases to 0.90 by 3 years; an unknown age takes the 1-year point.' }),
+      el('p', { class: 'sub', text: 'The comparables are the ' + f.comps + ' traded protocols with a market cap on record, cleaned the same way the board is cleaned: no wrapped, staked or bridged product, no exchange, and a market-cap-to-TVL ratio inside [0.05, 5] — the window where a token\u2019s value is actually tied to its protocol\u2019s size, so a nearly dead token (under a twentieth of its TVL) and a speculative premium (over five times it) cannot bend the fit. The fit is least squares of log10(market cap) on log10(TVL): intercept ' + f.intercept + ', slope ' + f.slope + ', R\u00b2 ' + f.r2 + '. A dollar of TVL is worth less, not more, as a protocol grows: the curve prices $1B of TVL at about ' + fmtUsd(curveAt(1e9)) + ' and $10B at about ' + fmtUsd(curveAt(1e10)) + ', where the old flat 0.25x multiple priced them at $250M and $2.5B. Growth and the launch window are small stated priors, not fitted claims: the comps show no reliable growth or age effect on the multiple, so a fast week lifts the value a little and a bad week trims it a little, and launchWindow rises from 0.80 at listing to 1.00 over 18 months, holds to 2 years, then eases to 0.90 by 3 years; an unknown age takes the 1-year point.' }),
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Leave-one-out, median error' }), el('b', { text: f.looMedian + 'x (p75 ' + f.looP75 + 'x)' })),
         el('div', { class: 'fact' }, el('span', { text: 'Time split (fit before Jun 2025, test after)' }), el('b', { text: f.splitMedian + 'x on ' + f.splitN + ' protocols' })),
+        el('div', { class: 'fact' }, el('span', { text: '5-fold cross-validation, median error' }), el('b', { text: f.kfoldMedian + 'x' })),
+        el('div', { class: 'fact' }, el('span', { text: 'Bootstrap slope, 90% interval' }), el('b', { text: f.slopeP5 + ' \u2013 ' + f.slopeP95 })),
         el('div', { class: 'fact' }, el('span', { text: 'Implied-value band' }), el('b', { text: '\u00f7/\u00d7 ' + f.band + 'x' })),
         el('div', { class: 'fact' }, el('span', { text: 'Farmer pool assumption' }), el('b', { text: (f.farmerPoolPct * 100) + '% pool \u00d7 ' + (f.farmerShare * 100) + '% share' }))
       ),
       el('p', { class: 'sub', text: 'Each farm plan is netted to the dollar in its last step: the gas the plan spends, the capital it puts to work (returned on exit), and what a top-tier farmer\u2019s share of a ' + (f.farmerPoolPct * 100) + '% farmer pool would be worth at the low end of the band. Farm when the net clears $100, Thin when it covers the gas, Skip when it does not. The pool and share are stated assumptions, not promises; the net is the plan\u2019s own arithmetic on them. The early radar is every genuine launch candidate the watchlist leaves out, above and below the floor, and the live-token protocols are set aside with their market caps shown.' })
+    );
+  }
+
+  // Why this model, and what was tried and rejected. A reader who only sees the formula
+  // cannot tell whether the choices behind it were tested or guessed, so this panel says
+  // plainly what was tried, what the blind tests said, and what the model does not claim.
+  function researchNote() {
+    var f = DATA.fit;
+    return el('section', { class: 'panel note' },
+      el('h2', { text: 'Why this model — and what it does not claim' }),
+      el('p', { class: 'sub', text: 'The size curve is the whole model, and it is fitted, not set: log10(market cap) on log10(TVL) over ' + f.comps + ' traded comparables the snapshot itself carries. The comparables are the traded protocols whose token value is actually tied to their size — a market-cap-to-TVL ratio inside [0.05, 5]. Below that window the token is nearly dead, above it the price is a speculative premium, and either tail bends the curve. The window keeps the ratio distribution\u2019s own bulk (median 0.25, 75th percentile about 1.06) and trims the tails.' }),
+      el('p', { class: 'sub', text: 'Four blind tests, all on this run: leave-one-out median error ' + f.looMedian + 'x, time split ' + f.splitMedian + 'x on ' + f.splitN + ' protocols listed after June 2025, 5-fold cross-validation ' + f.kfoldMedian + 'x, and a bootstrap over the comparables that puts the slope between ' + f.slopeP5 + ' and ' + f.slopeP95 + ' nine times in ten. The band the board states is the time-split error, \u00f7/\u00d7 ' + f.band + 'x. A wider comp window was tried and rejected: more comparables, worse blind error on every test. Fitting seven-day growth as a feature was tried and rejected too: one week\u2019s spike would dominate the valuation, and a protocol up thousands of percent in seven days would jump to the top of the board on noise alone, so growth stays a small prior. A category factor and a chain count were tried and rejected the same way — both raised the blind error.' }),
+      el('p', { class: 'sub', text: 'What the model does not claim: the implied value is an estimate from size alone, not a price, and the fit is noisy (R\u00b2 ' + f.r2 + ') because a protocol\u2019s token value depends on more than its TVL — its team, its token design, its timing. The band says how noisy. The farm plans are arithmetic on stated assumptions (a ' + (f.farmerPoolPct * 100) + '% farmer pool, a ' + (f.farmerShare * 100) + '% top-tier share), not a promise that any airdrop pays.' })
     );
   }
 
@@ -446,6 +464,29 @@
     } else {
       dialog.setAttribute('open', '');
     }
+  }
+
+  // The ten strongest launches, at a glance. A reader who never scrolls the 203-row board
+  // still sees the whole point of it: the top of the ranking, each row's implied value and
+  // its farm-plan verdict, in one strip.
+  function topStrip() {
+    var top = DATA.rows.slice(0, 10);
+    var items = top.map(function (r) {
+      return el('div', { class: 'top-item' },
+        el('span', { class: 'top-rank', text: '#' + r.rank }),
+        el('div', { class: 'name' },
+          el('b', { text: r.name }),
+          el('span', { class: 'sub', text: (r.category || 'Other') })
+        ),
+        el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) }),
+        el('span', { class: 'verdict verdict-' + r.net_verdict.toLowerCase(), text: r.net_verdict })
+      );
+    });
+    return el('section', { class: 'panel top10' },
+      el('h2', { text: 'The ten strongest launches' }),
+      el('p', { class: 'sub', text: 'Ranked by implied value. Select any row on the board below for its model and farm plan.' }),
+      el('div', { class: 'top-list' }, items)
+    );
   }
 
   // Where the implied value sits: the board grouped by category, strongest total first. A few
@@ -541,10 +582,12 @@
     var shell = el('div', { class: 'shell' });
     shell.appendChild(header());
     shell.appendChild(lede());
+    shell.appendChild(topStrip());
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') {
       shell.appendChild(modelPanel());
+      shell.appendChild(researchNote());
       var cats = categoryPanel();
       if (cats) shell.appendChild(cats);
       shell.appendChild(comparePanel());

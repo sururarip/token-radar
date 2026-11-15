@@ -162,3 +162,16 @@ tbody tr[data-selected="true"] { background: color-mix(in srgb, var(--accent) 8%
 .compare-pickers select { width: 100%; }
 .compare .table-wrap { margin-top: var(--step-2); }
 .compare-actions { display: flex; flex-wrap: wrap; gap: var(--step-2); }
+
+/* The ten strongest launches, at a glance: two columns of five, rank, name, value, verdict. */
+.top10 { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.top-list { display: grid; grid-template-columns: 1fr 1fr; gap: var(--step-2) var(--step-5); }
+.top-item { display: flex; align-items: center; gap: var(--step-3); padding: var(--step-2) 0; border-bottom: 1px solid var(--border); }
+.top-item:nth-last-child(-n+2) { border-bottom: 0; }
+.top-rank { font-family: var(--font-num); font-size: 13px; color: var(--accent); font-weight: 600; min-width: 28px; }
+.top-item .name { flex: 1; min-width: 0; }
+.top-item .num { font-family: var(--font-num); font-size: 13px; }
+
+/* Why this model: the research note, styled like the model panel it follows. */
+.note { margin-top: var(--step-4); padding: var(--step-5); display: grid; gap: var(--step-3); }
+.note p { color: var(--muted); max-width: 78ch; }
